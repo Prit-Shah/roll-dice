@@ -2,11 +2,10 @@
 
 import type React from "react"
 import { createContext, useContext, useEffect, useState } from "react"
-import { auth, database } from "@/lib/firebase"
-import { signInAnonymously, onAuthStateChanged } from "firebase/auth"
-import { ref, onValue, set, update, get, onDisconnect } from "firebase/database"
-import type { Room } from "@/types/game"
+import { auth, getData, setData, updateData, removeData, ref, onDisconnect, database, onValue } from "@/lib/firebase"
+import { signInAnonymously } from "firebase/auth"
 import { generateRoomCode, generateGuestName } from "@/lib/utils"
+import type { Room } from "@/types/game"
 
 interface GameContextType {
   user: { id: string; name: string } | null
@@ -19,6 +18,7 @@ interface GameContextType {
   rollDice: () => Promise<void>
   takeScore: () => Promise<void>
   isCurrentPlayer: () => boolean
+  startGame: () => Promise<void>
 }
 
 const GameContext = createContext<GameContextType>({
@@ -32,6 +32,7 @@ const GameContext = createContext<GameContextType>({
   rollDice: async () => {},
   takeScore: async () => {},
   isCurrentPlayer: () => false,
+  startGame: async () => {},
 })
 
 export const useGame = () => useContext(GameContext)
@@ -41,60 +42,48 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [room, setRoom] = useState<Room | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [firebaseInitialized, setFirebaseInitialized] = useState(false)
-
-  // Check if Firebase is properly initialized
-  useEffect(() => {
-    if (!auth || !database) {
-      setError("Firebase initialization failed. Check your environment variables.")
-      setLoading(false)
-      return
-    }
-
-    setFirebaseInitialized(true)
-  }, [])
 
   // Handle authentication
   useEffect(() => {
-    if (!firebaseInitialized) return
+    console.log("Setting up auth state listener")
 
-    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+    const unsubscribe = auth.onAuthStateChanged(async (user) => {
+      console.log("Auth state changed:", user)
+
       if (user) {
         const guestName = generateGuestName()
+        console.log("User authenticated:", user.uid, guestName)
         setUser({ id: user.uid, name: guestName })
       } else {
         try {
+          console.log("Attempting anonymous sign in")
           await signInAnonymously(auth)
-        } catch (error: any) {
+        } catch (error) {
           console.error("Auth error:", error)
 
-          // Provide a more specific error message
-          if (error.code === "auth/configuration-not-found") {
-            setError("Firebase authentication configuration not found. Please check your environment variables.")
-          } else {
-            setError(`Authentication failed: ${error.message}`)
-          }
+          // Create a fallback user for development
+          const fallbackId = `fallback-${Math.random().toString(36).substring(2, 9)}`
+          const fallbackName = `Guest${Math.floor(1000 + Math.random() * 9000)}`
+          console.log("Using fallback user:", fallbackId, fallbackName)
+          setUser({ id: fallbackId, name: fallbackName })
 
-          // Create a fallback user for development/testing
-          if (process.env.NODE_ENV === "development") {
-            const fallbackId = `fallback-${Math.random().toString(36).substring(2, 9)}`
-            setUser({ id: fallbackId, name: `Guest${Math.floor(1000 + Math.random() * 9000)}` })
-          }
+          setError("Authentication failed. Using fallback user.")
         }
       }
+
       setLoading(false)
     })
 
     return () => unsubscribe()
-  }, [firebaseInitialized])
+  }, [])
 
   // Create a new room
   const createRoom = async (): Promise<string> => {
-    if (!user || !firebaseInitialized) return ""
+    if (!user) return ""
 
     try {
       const roomCode = generateRoomCode()
-      const roomRef = ref(database, `rooms/${roomCode}`)
+      console.log("Creating room:", roomCode)
 
       const newRoom: Room = {
         id: roomCode,
@@ -111,16 +100,19 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
           currentPlayerId: user.id,
           accumulatedScore: 0,
           diceValues: [],
-          phase: "waiting",
+          phase: "waiting", // Start in waiting phase
           lastRollTime: Date.now(),
+          winner: null,
         },
         settings: {
           maxPlayers: 6,
           targetScore: 100,
+          turnTimeLimit: 20, // 20 seconds per turn
         },
       }
 
-      await set(roomRef, newRoom)
+      // Use our setData helper
+      await setData(`rooms/${roomCode}`, newRoom)
       await joinRoom(roomCode)
       return roomCode
     } catch (error) {
@@ -132,28 +124,24 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   // Join an existing room
   const joinRoom = async (roomId: string): Promise<boolean> => {
-    if (!user || !firebaseInitialized) return false
+    if (!user) return false
 
     try {
-      const roomRef = ref(database, `rooms/${roomId}`)
-      const snapshot = await get(roomRef)
+      console.log("Joining room:", roomId)
 
-      if (!snapshot.exists()) {
+      const roomData = await getData(`rooms/${roomId}`)
+      if (!roomData) {
         setError("Room not found")
         return false
       }
 
-      const roomData = snapshot.val() as Room
-
-      // Check if game is in progress
+      // Set player status based on game phase
+      // If game is in progress, new players join as "waiting"
       const status = roomData.gameState.phase === "playing" ? "waiting" : "active"
-
-      // Find the next available turn order
       const players = Object.values(roomData.players || {})
-      const maxTurnOrder = players.length > 0 ? Math.max(...players.map((p) => p.turnOrder)) : 0
+      const maxTurnOrder = players.length > 0 ? Math.max(...players.map((p: any) => p.turnOrder)) : 0
 
-      // Add player to room
-      await update(ref(database, `rooms/${roomId}/players/${user.id}`), {
+      await updateData(`rooms/${roomId}/players/${user.id}`, {
         id: user.id,
         name: user.name,
         score: 0,
@@ -163,9 +151,12 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       // Set up disconnect handler
       const playerRef = ref(database, `rooms/${roomId}/players/${user.id}`)
-      onDisconnect(playerRef).update({ status: "disconnected" })
+      const disconnectRef = onDisconnect(playerRef)
+      await disconnectRef.update({
+        status: "disconnected",
+      })
 
-      // Subscribe to room updates
+      const roomRef = ref(database, `rooms/${roomId}`)
       onValue(roomRef, (snapshot) => {
         if (snapshot.exists()) {
           setRoom(snapshot.val() as Room)
@@ -182,13 +173,12 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }
 
-  // Leave the current room
+  // Leave a room
   const leaveRoom = async (): Promise<void> => {
-    if (!user || !room) return
+    if (!room || !user) return
 
     try {
-      const playerRef = ref(database, `rooms/${room.id}/players/${user.id}`)
-      await set(playerRef, null)
+      await removeData(`rooms/${room.id}/players/${user.id}`)
       setRoom(null)
     } catch (error) {
       console.error("Leave room error:", error)
@@ -196,158 +186,152 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }
 
-  // Roll the dice
-  const rollDice = async (): Promise<void> => {
-    if (!user || !room || !isCurrentPlayer()) return
+  // Start a new game
+  const startGame = async (): Promise<void> => {
+    if (!room || !user) return
 
     try {
-      // Generate random dice values (2 dice)
-      const diceValues = [Math.floor(Math.random() * 6) + 1, Math.floor(Math.random() * 6) + 1]
+      const players = Object.values(room.players)
+      
+      // Need at least 2 players to start
+      if (players.length < 2) {
+        setError("Need at least 2 players to start")
+        return
+      }
 
-      // Check if any 1 was rolled
-      const hasOne = diceValues.includes(1)
+      // Activate all waiting players
+      const playerUpdates:any = {}
+      players.forEach((player:any) => {
+        playerUpdates[`players/${player.id}/status`] = "active"
+        playerUpdates[`players/${player.id}/score`] = 0 // Reset scores for new game
+      })
 
-      // Calculate score for this roll
-      const rollScore = hasOne ? 0 : diceValues.reduce((sum, val) => sum + val, 0)
+      // Choose first player (lowest turnOrder)
+      const sortedPlayers = [...players].sort((a, b) => a.turnOrder - b.turnOrder)
+      const firstPlayerId = sortedPlayers[0].id
 
       // Update game state
-      const updates: any = {
-        [`rooms/${room.id}/gameState/diceValues`]: diceValues,
-        [`rooms/${room.id}/gameState/lastRollTime`]: Date.now(),
+      await updateData(`rooms/${room.id}`, {
+        ...playerUpdates,
+        gameState: {
+          currentPlayerId: firstPlayerId,
+          accumulatedScore: 0,
+          diceValues: [],
+          phase: "playing",
+          lastRollTime: Date.now(),
+          winner: null,
+        }
+      })
+
+      console.log("Game started with first player:", firstPlayerId)
+    } catch (error) {
+      console.error("Start game error:", error)
+      setError("Failed to start game")
+    }
+  }
+
+  // Roll the dice
+  const rollDice = async (): Promise<void> => {
+    if (!room || !user) return
+
+    try {
+      // Only current player can roll
+      if (room.gameState.currentPlayerId !== user.id) {
+        console.log("Not your turn to roll")
+        return
       }
 
-      if (hasOne) {
-        // If rolled a 1, reset accumulated score and move to next player
-        updates[`rooms/${room.id}/gameState/accumulatedScore`] = 0
-        updates[`rooms/${room.id}/gameState/currentPlayerId`] = getNextPlayerId()
+      // Generate random dice values
+      const diceValues = Array.from({ length: 2 }, () => Math.floor(Math.random() * 6) + 1)
+      console.log("Rolled dice values:", diceValues)
+
+      // Check if a 1 was rolled
+      const rolledOne = diceValues.includes(1)
+
+      if (rolledOne) {
+        // If a 1 was rolled, reset accumulated score and move to next player
+        const players = Object.values(room.players).filter(p => p.status === "active")
+        const currentPlayerIndex = players.findIndex((p) => p.id === room.gameState.currentPlayerId)
+        const nextPlayerIndex = (currentPlayerIndex + 1) % players.length
+        const nextPlayerId = players[nextPlayerIndex].id
+
+        console.log("Rolled a 1! Moving from player", room.gameState.currentPlayerId, "to", nextPlayerId)
+
+        // Update game state - reset score and change player
+        await updateData(`rooms/${room.id}/gameState`, {
+          diceValues: [],
+          accumulatedScore: 0, // Reset accumulated score when a 1 is rolled
+          lastRollTime: Date.now(),
+          currentPlayerId: nextPlayerId, // Change to next player
+        })
       } else {
-        // Add to accumulated score
-        updates[`rooms/${room.id}/gameState/accumulatedScore`] = room.gameState.accumulatedScore + rollScore
-      }
+        // If no 1 was rolled, add to accumulated score but keep the same player
+        const newAccumulatedScore = room.gameState.accumulatedScore + diceValues.reduce((a, b) => a + b, 0)
+        console.log("Good roll! Adding to score:", newAccumulatedScore)
 
-      await update(ref(database), updates)
+        // Update game state - add to score but keep same player
+        await updateData(`rooms/${room.id}/gameState`, {
+          diceValues,
+          accumulatedScore: newAccumulatedScore,
+          lastRollTime: Date.now(),
+          // No change to currentPlayerId - same player continues
+        })
+      }
     } catch (error) {
       console.error("Roll dice error:", error)
       setError("Failed to roll dice")
     }
   }
 
-  // Take the accumulated score
+  // Take score
   const takeScore = async (): Promise<void> => {
-    if (!user || !room || !isCurrentPlayer()) return
+    if (!room || !user) return
 
     try {
-      const currentScore = room.players[user.id].score
-      const newScore = currentScore + room.gameState.accumulatedScore
+      // Get current player
+      const currentPlayerId = room.gameState.currentPlayerId
+      if (currentPlayerId !== user.id) return // Safety check
 
-      const updates: any = {
-        [`rooms/${room.id}/players/${user.id}/score`]: newScore,
-        [`rooms/${room.id}/gameState/accumulatedScore`]: 0,
-        [`rooms/${room.id}/gameState/currentPlayerId`]: getNextPlayerId(),
+      // Update player's score
+      const currentPlayer = room.players[currentPlayerId]
+      const newScore = currentPlayer.score + room.gameState.accumulatedScore
+      await updateData(`rooms/${room.id}/players/${currentPlayerId}`, {score: newScore })
+
+      // Check if player reached target score (win condition)
+      if (newScore >= (room.settings.targetScore || 100)) {
+        // Player won the game
+        await updateData(`rooms/${room.id}/gameState`, {
+          winner: currentPlayerId,
+          phase: "ended",
+        })
+        
+        console.log("Game ended! Winner:", currentPlayerId)
+        return
       }
 
-      // Check if player has won
-      if (newScore >= room.settings.targetScore) {
-        updates[`rooms/${room.id}/gameState/phase`] = "ended"
-      }
+      // Move to next player (only active players)
+      const activePlayers = Object.values(room.players).filter(p => p.status === "active")
+      const currentPlayerIndex = activePlayers.findIndex((p) => p.id === currentPlayerId)
+      const nextPlayerIndex = (currentPlayerIndex + 1) % activePlayers.length
+      const nextPlayerId = activePlayers[nextPlayerIndex].id
 
-      await update(ref(database), updates)
-
-      // If game ended, start a new game after a delay
-      if (newScore >= room.settings.targetScore) {
-        setTimeout(() => startNewGame(), 5000)
-      }
+      // Update game state for next player
+      await updateData(`rooms/${room.id}/gameState`, {
+        currentPlayerId: nextPlayerId,
+        accumulatedScore: 0,
+        diceValues: [], // Reset dice values for next player
+        lastRollTime: Date.now(),
+      })
+      
+      console.log("Turn passed to next player:", nextPlayerId)
     } catch (error) {
       console.error("Take score error:", error)
       setError("Failed to take score")
     }
   }
 
-  // Start a new game
-  const startNewGame = async (): Promise<void> => {
-    if (!room) return
-
-    try {
-      // Reset all player scores and activate waiting players
-      const updatedPlayers: Record<string, any> = {}
-
-      Object.entries(room.players).forEach(([playerId, player]) => {
-        updatedPlayers[`rooms/${room.id}/players/${playerId}/score`] = 0
-
-        if (player.status === "waiting") {
-          updatedPlayers[`rooms/${room.id}/players/${playerId}/status`] = "active"
-        }
-      })
-
-      // Find the first active player
-      const activePlayers = Object.values(room.players)
-        .filter((p) => p.status === "active" || p.status === "waiting")
-        .sort((a, b) => a.turnOrder - b.turnOrder)
-
-      const firstPlayerId = activePlayers.length > 0 ? activePlayers[0].id : user?.id
-
-      // Reset game state
-      const updates = {
-        ...updatedPlayers,
-        [`rooms/${room.id}/gameState/phase`]: "playing",
-        [`rooms/${room.id}/gameState/currentPlayerId`]: firstPlayerId,
-        [`rooms/${room.id}/gameState/accumulatedScore`]: 0,
-        [`rooms/${room.id}/gameState/diceValues`]: [],
-        [`rooms/${room.id}/gameState/lastRollTime`]: Date.now(),
-      }
-
-      await update(ref(database), updates)
-    } catch (error) {
-      console.error("Start new game error:", error)
-      setError("Failed to start new game")
-    }
-  }
-
-  // Check if current user is the active player
-  const isCurrentPlayer = (): boolean => {
-    if (!user || !room) return false
-    return room.gameState.currentPlayerId === user.id
-  }
-
-  // Get the ID of the next player in turn
-  const getNextPlayerId = (): string => {
-    if (!room) return ""
-
-    const activePlayers = Object.values(room.players)
-      .filter((p) => p.status === "active")
-      .sort((a, b) => a.turnOrder - b.turnOrder)
-
-    if (activePlayers.length === 0) return ""
-
-    const currentIndex = activePlayers.findIndex((p) => p.id === room.gameState.currentPlayerId)
-    const nextIndex = (currentIndex + 1) % activePlayers.length
-
-    return activePlayers[nextIndex].id
-  }
-
-  // Auto-take score if player is inactive for too long
-  useEffect(() => {
-    if (!room || !isCurrentPlayer()) return
-
-    const inactivityTimeout = 20000 // 20 seconds
-    const currentTime = Date.now()
-    const lastActionTime = room.gameState.lastRollTime
-
-    if (currentTime - lastActionTime > inactivityTimeout) {
-      takeScore()
-    }
-
-    const timer = setTimeout(
-      () => {
-        if (isCurrentPlayer()) {
-          takeScore()
-        }
-      },
-      inactivityTimeout - (currentTime - lastActionTime),
-    )
-
-    return () => clearTimeout(timer)
-  }, [room, room?.gameState.lastRollTime])
+  // Check if current player
+  const isCurrentPlayer = () => room?.gameState.currentPlayerId === user?.id
 
   return (
     <GameContext.Provider
@@ -362,6 +346,7 @@ export const GameProvider: React.FC<{ children: React.ReactNode }> = ({ children
         rollDice,
         takeScore,
         isCurrentPlayer,
+        startGame,
       }}
     >
       {children}

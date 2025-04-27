@@ -15,11 +15,13 @@ export interface GameState {
   diceValues: number[]
   phase: GamePhase
   lastRollTime: number
+  winner: string | null
 }
 
 export interface GameSettings {
   maxPlayers: number
   targetScore: number
+  turnTimeLimit?: number
 }
 
 export interface Room {

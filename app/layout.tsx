@@ -9,7 +9,6 @@ const inter = Inter({ subsets: ["latin"] })
 export const metadata: Metadata = {
   title: "Greedy Dice Game",
   description: "A multiplayer dice game with 3D animations",
-    generator: 'v0.dev'
 }
 
 export default function RootLayout({

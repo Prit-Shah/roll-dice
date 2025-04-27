@@ -1,70 +1,18 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState } from "react"
 import { useGame } from "@/context/GameContext"
 import PokerTable from "@/components/PokerTable"
+import { firebaseInitialized } from "@/lib/firebase"
 
 export default function Home() {
   const { user, room, loading, error, createRoom, joinRoom, leaveRoom } = useGame()
   const [roomCode, setRoomCode] = useState("")
-  const [envVarsPresent, setEnvVarsPresent] = useState(true)
-
-  // Check if required environment variables are present
-  useEffect(() => {
-    const requiredVars = [
-      "NEXT_PUBLIC_FIREBASE_API_KEY",
-      "NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN",
-      "NEXT_PUBLIC_FIREBASE_PROJECT_ID",
-      "NEXT_PUBLIC_FIREBASE_DATABASE_URL",
-    ]
-
-    const missingVars = requiredVars.filter((varName) => !process.env[varName] || process.env[varName] === "")
-
-    if (missingVars.length > 0) {
-      setEnvVarsPresent(false)
-    }
-  }, [])
-
-  if (!envVarsPresent) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-900">
-        <div className="bg-gray-800 p-8 rounded-xl shadow-2xl max-w-md w-full">
-          <h1 className="text-3xl font-bold text-white text-center mb-8">Configuration Error</h1>
-          <div className="text-red-400 mb-4">
-            Missing required Firebase environment variables. Please check your Vercel project configuration.
-          </div>
-          <div className="text-gray-300 text-sm">
-            <p className="mb-2">Required variables:</p>
-            <ul className="list-disc pl-5 space-y-1">
-              <li>NEXT_PUBLIC_FIREBASE_API_KEY</li>
-              <li>NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN</li>
-              <li>NEXT_PUBLIC_FIREBASE_PROJECT_ID</li>
-              <li>NEXT_PUBLIC_FIREBASE_DATABASE_URL</li>
-            </ul>
-          </div>
-        </div>
-      </div>
-    )
-  }
 
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-900">
         <div className="text-white text-2xl">Loading...</div>
-      </div>
-    )
-  }
-
-  if (error) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-900">
-        <div className="bg-gray-800 p-8 rounded-xl shadow-2xl max-w-md w-full">
-          <h1 className="text-3xl font-bold text-white text-center mb-8">Error</h1>
-          <div className="text-red-400 mb-4">{error}</div>
-          <div className="text-gray-300 text-sm">
-            <p>Please check your Firebase configuration and try again.</p>
-          </div>
-        </div>
       </div>
     )
   }
@@ -75,6 +23,20 @@ export default function Home() {
       <div className="min-h-screen flex items-center justify-center bg-gray-900">
         <div className="bg-gray-800 p-8 rounded-xl shadow-2xl max-w-md w-full">
           <h1 className="text-3xl font-bold text-white text-center mb-8">Greedy Dice Game</h1>
+
+          {!firebaseInitialized && (
+            <div className="mb-4 p-3 bg-yellow-900/50 border border-yellow-700 rounded-lg">
+              <p className="text-yellow-300 text-sm">
+                ⚠️ Running in fallback mode. Firebase initialization failed. Some features may be limited.
+              </p>
+            </div>
+          )}
+
+          {error && (
+            <div className="mb-4 p-3 bg-red-900/50 border border-red-700 rounded-lg">
+              <p className="text-red-300 text-sm">{error}</p>
+            </div>
+          )}
 
           <div className="space-y-6">
             {/* Join room */}
@@ -127,6 +89,14 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-gray-900 p-4">
       <div className="max-w-6xl mx-auto">
+        {!firebaseInitialized && (
+          <div className="mb-4 p-3 bg-yellow-900/50 border border-yellow-700 rounded-lg">
+            <p className="text-yellow-300 text-sm">
+              ⚠️ Running in fallback mode. Firebase initialization failed. Some features may be limited.
+            </p>
+          </div>
+        )}
+
         <div className="flex justify-between items-center mb-6">
           <h1 className="text-2xl font-bold text-white">Room: {room.id}</h1>
 
@@ -145,7 +115,7 @@ export default function Home() {
         <div className="mt-8 bg-gray-800 rounded-lg p-4">
           <h2 className="text-xl font-bold text-white mb-4">Scoreboard</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {Object.values(room.players)
+            {room?.players && Object.values(room.players)
               .sort((a, b) => b.score - a.score)
               .map((player) => (
                 <div key={player.id} className="bg-gray-700 p-3 rounded-lg flex justify-between items-center">
