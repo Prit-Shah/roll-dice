@@ -1,0 +1,25 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --foreground-rgb: 255, 255, 255;
+  --background-start-rgb: 0, 0, 0;
+  --background-end-rgb: 0, 0, 0;
+}
+
+body {
+  color: rgb(var(--foreground-rgb));
+  background: linear-gradient(to bottom, transparent, rgb(var(--background-end-rgb))) rgb(var(--background-start-rgb));
+}
+
+/* Custom styles for the poker table */
+@layer components {
+  .poker-table {
+    @apply relative w-full max-w-4xl aspect-[4/3] mx-auto;
+  }
+
+  .poker-felt {
+    @apply absolute inset-0 bg-green-800 rounded-[40%] border-8 border-brown-800 shadow-xl;
+  }
+}
